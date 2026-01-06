@@ -1,0 +1,833 @@
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  Camera,
+  Activity,
+  ArrowRight,
+  RefreshCw,
+  Sparkles,
+  Droplet,
+  User,
+  Sun,
+  ChevronRight,
+} from 'lucide-react';
+import {
+  Radar,
+  RadarChart,
+  PolarGrid,
+  PolarAngleAxis,
+  PolarRadiusAxis,
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+} from 'recharts';
+
+/**
+ * BODINOTE PRO SKIN ANALYSIS APP
+ * Full UI Version (Canvas runnable)
+ *
+ * IMPORTANT (User request): UI must not be changed.
+ *
+ * Fixes:
+ * - Removes ALL `await` usage to prevent "Unexpected reserved word 'await'" in some runtimes.
+ * - Google Sheet sync runs only when (beforeData && afterData) are ready.
+ * - Name input supports typing + datalist selection without Korean IME "eaten" characters.
+ */
+
+// ✅ 이름 선택/직접입력 겸용 리스트 (가나다순)
+const NAME_OPTIONS = [
+  '고창혁',
+  '곽진호',
+  '김윤하',
+  '김준태',
+  '남지한',
+  '남효은',
+  '노대현',
+  '노창빈',
+  '박명화',
+  '박민규',
+  '박용철',
+  '송민기',
+  '신유하',
+  '신지원',
+  '안수현',
+  '양은지',
+  '윤형식',
+  '이도검',
+  '이병주',
+  '이승연',
+  '이시훈',
+  '이찬희',
+  '이현주',
+  '임은영',
+  '임태민',
+  '정윤하',
+  '조은별',
+  '최승원',
+  '최시우',
+  '한동연',
+  '황지선',
+];
+
+// --- Helpers (testable) ---
+const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n));
+
+const randomScore = (base: number) => {
+  // base ±7, clamp to [0,100]
+  const delta = Math.floor(Math.random() * 15) - 7;
+  return clamp(base + delta, 0, 100);
+};
+
+type SkinData = {
+  moisture: number;
+  pores: number;
+  tone: number;
+  elasticity: number;
+  score: number;
+};
+
+const buildSkinData = (type: 'before' | 'after'): SkinData => {
+  const data: SkinData = {
+    moisture: randomScore(type === 'before' ? 42 : 92),
+    pores: randomScore(type === 'before' ? 48 : 85),
+    tone: randomScore(type === 'before' ? 52 : 88),
+    elasticity: randomScore(type === 'before' ? 45 : 82),
+    score: 0,
+  };
+  data.score = Math.floor((data.moisture + data.pores + data.tone + data.elasticity) / 4);
+  return data;
+};
+
+const hasAllMetrics = (d: any): d is SkinData =>
+  !!d &&
+  typeof d.score === 'number' &&
+  typeof d.moisture === 'number' &&
+  typeof d.pores === 'number' &&
+  typeof d.tone === 'number' &&
+  typeof d.elasticity === 'number';
+
+// Payload builder (testable)
+const buildSheetPayload = ({
+  before,
+  after,
+  name,
+  createdAtKST,
+}: {
+  before: SkinData;
+  after: SkinData;
+  name: string;
+  createdAtKST: string;
+}) =>
+  JSON.stringify({
+    name: name || 'UNKNOWN',
+    created_at: createdAtKST,
+    before_score: before.score,
+    before_moisture: before.moisture,
+    before_pores: before.pores,
+    before_tone: before.tone,
+    before_elasticity: before.elasticity,
+    after_score: after.score,
+    after_moisture: after.moisture,
+    after_pores: after.pores,
+    after_tone: after.tone,
+    after_elasticity: after.elasticity,
+  });
+
+// ✅ GAS 안정 전송: application/x-www-form-urlencoded
+const toFormBody = (payloadJson: string) => {
+  const obj = JSON.parse(payloadJson) as Record<string, any>;
+  return new URLSearchParams(obj as any).toString();
+};
+
+// Lightweight self-tests (no jest in canvas)
+;(() => {
+  const __DEV__ = typeof process === 'undefined' || (process as any)?.env?.NODE_ENV !== 'production';
+  if (!__DEV__) return;
+
+  const d1 = buildSkinData('before');
+  const d2 = buildSkinData('after');
+
+  console.assert(hasAllMetrics(d1), 'SelfTest: before data should have metrics');
+  console.assert(hasAllMetrics(d2), 'SelfTest: after data should have metrics');
+  console.assert(d1.score >= 0 && d1.score <= 100, 'SelfTest: score should be within 0..100');
+  console.assert(d2.score >= 0 && d2.score <= 100, 'SelfTest: score should be within 0..100');
+
+  // Sanity: computed score equals average floor
+  const avg1 = Math.floor((d1.moisture + d1.pores + d1.tone + d1.elasticity) / 4);
+  const avg2 = Math.floor((d2.moisture + d2.pores + d2.tone + d2.elasticity) / 4);
+  console.assert(d1.score === avg1, 'SelfTest: score should be computed average (before)');
+  console.assert(d2.score === avg2, 'SelfTest: score should be computed average (after)');
+
+  // Payload includes required keys
+  const payloadStr = buildSheetPayload({
+    before: d1,
+    after: d2,
+    name: 'TEST',
+    createdAtKST: '2026-01-07T00:00:00+09:00',
+  });
+  const payload = JSON.parse(payloadStr);
+  const keys = [
+    'name',
+    'created_at',
+    'before_score',
+    'before_moisture',
+    'before_pores',
+    'before_tone',
+    'before_elasticity',
+    'after_score',
+    'after_moisture',
+    'after_pores',
+    'after_tone',
+    'after_elasticity',
+  ];
+  console.assert(keys.every((k) => k in payload), 'SelfTest: payload should include all required keys');
+
+  // Test: name fallback
+  const payloadStr2 = buildSheetPayload({
+    before: d1,
+    after: d2,
+    name: '',
+    createdAtKST: '2026-01-07T00:00:00+09:00',
+  });
+  const payload2 = JSON.parse(payloadStr2);
+  console.assert(payload2.name === 'UNKNOWN', 'SelfTest: empty name should become UNKNOWN');
+
+  // Test: form body should contain key fields
+  const formBody = toFormBody(payloadStr);
+  console.assert(formBody.includes('name=TEST'), 'SelfTest: form body should include name');
+  console.assert(formBody.includes('created_at='), 'SelfTest: form body should include created_at');
+  console.assert(formBody.includes('before_score='), 'SelfTest: form body should include before_score');
+  console.assert(formBody.includes('after_score='), 'SelfTest: form body should include after_score');
+})();
+
+const BodiNoteProApp = () => {
+  const [step, setStep] = useState<
+    'intro' | 'capture-before' | 'analyze-before' | 'treatment' | 'capture-after' | 'result'
+  >(() => {
+    try {
+      return (sessionStorage.getItem('bodinote_step') as any) || 'intro';
+    } catch {
+      return 'intro';
+    }
+  });
+  const [userName, setUserName] = useState('');
+  const [isComposing, setIsComposing] = useState(false);
+  const [beforeImage, setBeforeImage] = useState<string | null>(null);
+  const [afterImage, setAfterImage] = useState<string | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+
+  const [beforeData, setBeforeData] = useState<SkinData | null>(null);
+  const [afterData, setAfterData] = useState<SkinData | null>(null);
+
+  // ✅ Google Sheet 연동
+  const GOOGLE_SHEET_WEBAPP_URL =
+    'https://script.google.com/macros/s/AKfycbyXpxyytG8lDVXLrtn6uuImXSf-7f0jOca0ay6rULI9BOG97obMs2PrQfU3y5cpsvQYVw/exec';
+
+  // Refs to avoid stale closures
+  const userNameRef = useRef(userName);
+  const beforeRef = useRef(beforeData);
+  const afterRef = useRef(afterData);
+
+  const [hasSynced, setHasSynced] = useState(false);
+  const [syncState, setSyncState] = useState<{
+    status: 'idle' | 'syncing' | 'ok' | 'error';
+    message: string;
+  }>({
+    status: 'idle',
+    message: '',
+  });
+
+  useEffect(() => {
+    afterRef.current = afterData;
+  }, [afterData]);
+
+  // 🔒 Persist step to survive permission-triggered reloads (iOS/Safari/Canvas)
+  useEffect(() => {
+    try {
+      sessionStorage.setItem('bodinote_step', step);
+    } catch {}
+  }, [step]);
+
+  // ✅ NO async/await version (Promise chain only)
+  const sendToGoogleSheet = ({
+    before,
+    after,
+    name,
+  }: {
+    before: SkinData;
+    after: SkinData;
+    name: string;
+  }): Promise<{ ok: boolean; reason?: string; detail?: string }> => {
+    if (!GOOGLE_SHEET_WEBAPP_URL) return Promise.resolve({ ok: false, reason: 'NO_URL' });
+
+    if (!hasAllMetrics(before) || !hasAllMetrics(after)) {
+      return Promise.resolve({ ok: false, reason: 'MISSING_DATA' });
+    }
+
+    // 🇰🇷 한국 시간(KST)으로 생성
+    const createdAtKST = new Date(Date.now() + 9 * 60 * 60 * 1000)
+      .toISOString()
+      .replace('Z', '+09:00');
+
+    const payloadJson = buildSheetPayload({ before, after, name, createdAtKST });
+
+    // ✅ 안정판: form-urlencoded POST (GAS doPost에서 안정 수신)
+    let formBody = '';
+    try {
+      formBody = toFormBody(payloadJson);
+    } catch (e: any) {
+      console.error('Payload -> formBody error', e);
+      return Promise.resolve({ ok: false, reason: 'PAYLOAD_PARSE_ERROR', detail: String(e?.message || e) });
+    }
+
+    return fetch(GOOGLE_SHEET_WEBAPP_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: formBody,
+    })
+      .then(() => ({ ok: true }))
+      .catch((e: any) => {
+        console.error('Google Sheet sync error', e);
+        return { ok: false, reason: 'NETWORK_ERROR', detail: String(e?.message || e) };
+      });
+  };
+
+  // ✅ 최종: AFTER 분석 완료 시 1회만 저장 (실패해도 화면은 그대로 유지)
+  useEffect(() => {
+    if (hasSynced) return;
+    if (!beforeData || !afterData) return;
+    if (!hasAllMetrics(beforeData) || !hasAllMetrics(afterData)) return;
+
+    let cancelled = false;
+    setSyncState({ status: 'syncing', message: 'Google Sheet 저장 중…' });
+
+    const safeName =
+      userNameRef.current && userNameRef.current.trim() ? userNameRef.current.trim() : 'UNKNOWN';
+
+    sendToGoogleSheet({ before: beforeData, after: afterData, name: safeName }).then((result) => {
+      if (cancelled) return;
+      if (result.ok) {
+        setHasSynced(true);
+        setSyncState({ status: 'ok', message: 'Google Sheet 저장 완료' });
+      } else {
+        setSyncState({ status: 'error', message: 'Google Sheet 저장 실패' });
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [beforeData, afterData, hasSynced]);
+
+  // 스캔 애니메이션을 위한 스타일
+  const scanStyle = `
+    @keyframes scan {
+      0% { top: 0%; opacity: 0; }
+      10% { opacity: 1; }
+      90% { opacity: 1; }
+      100% { top: 100%; opacity: 0; }
+    }
+    .animate-scan {
+      animation: scan 2s linear infinite;
+    }
+  `;
+
+  // 시뮬레이션 로직
+  const simulateAnalysis = (type: 'before' | 'after') => {
+    setIsAnalyzing(true);
+    // 즉시 단계 변경하여 로딩(분석) 화면 노출
+    setStep(type === 'before' ? 'analyze-before' : 'result');
+
+    setTimeout(() => {
+      const data = buildSkinData(type);
+
+      if (type === 'before') {
+        setBeforeData(data);
+      } else {
+        setAfterData(data);
+        // ❌ do NOT sync here (beforeData could still be stale)
+        // ✅ syncing happens in useEffect when both states are ready
+      }
+
+      setIsAnalyzing(false);
+    }, 2500);
+  };
+
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>, type: 'before' | 'after') => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        if (type === 'before') {
+          setBeforeImage(reader.result as string);
+          simulateAnalysis('before');
+        } else {
+          setAfterImage(reader.result as string);
+          simulateAnalysis('after');
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  // --- UI Components ---
+
+  const Header = () => (
+    <header className="flex items-center justify-between px-6 py-5 bg-[#FDFCF8]/90 backdrop-blur-md sticky top-0 z-20 border-b border-[#E5E0D8]">
+      <div className="flex items-center gap-2">
+        <h1 className="text-xl font-serif font-bold text-[#1B4B43] tracking-wide">
+          BODINOTE <span className="font-light">PRO</span>
+        </h1>
+      </div>
+      <div className="w-8 h-8 rounded-full bg-[#1B4B43] flex items-center justify-center text-white">
+        <User size={16} />
+      </div>
+    </header>
+  );
+
+  const IntroView = () => (
+    <div className="flex flex-col min-h-[80vh] px-6 pt-10 pb-6 bg-[#FDFCF8]">
+      <div className="flex-1 flex flex-col justify-center items-center text-center">
+        <div className="relative mb-10 group">
+          <div className="absolute inset-0 bg-[#D4C4B5]/30 rounded-full blur-2xl transform group-hover:scale-110 transition-transform duration-700"></div>
+          <div className="relative w-64 h-64 rounded-full overflow-hidden border border-[#E5E0D8] shadow-2xl">
+            <img
+              src="https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=800&q=60"
+              alt="Beauty Portrait"
+              className="w-full h-full object-cover opacity-90 hover:scale-105 transition-transform duration-700"
+            />
+          </div>
+          <div className="absolute -bottom-4 left-1/2 transform -translate-x-1/2 bg-white px-4 py-1 rounded-full shadow-md border border-[#E5E0D8] flex items-center gap-1">
+            <Sparkles size={14} className="text-amber-500" />
+            <span className="text-xs font-medium text-gray-500 tracking-wider uppercase">AI Analysis</span>
+          </div>
+        </div>
+
+        <h2 className="text-3xl font-serif text-[#1B4B43] mb-4 leading-tight">
+          Discover Your <br />
+          <span className="italic font-light">True Radiance</span>
+        </h2>
+
+        <div className="w-full max-w-xs mx-auto mb-3">
+          {/*
+            IMPORTANT:
+            - Using datalist + controlled value can cause Korean IME characters to be "eaten" in some browsers.
+            - Use an uncontrolled input and sync to state on input/blur/compositionEnd.
+          */}
+          <input
+            type="text"
+            list="name-options"
+            placeholder="이름을 입력하거나 선택해주세요"
+            defaultValue=""
+            onCompositionStart={() => setIsComposing(true)}
+            onCompositionEnd={(e) => {
+              setIsComposing(false);
+              setUserName((e.currentTarget as HTMLInputElement).value);
+            }}
+            onInput={(e) => {
+              if (!isComposing) {
+                setUserName((e.currentTarget as HTMLInputElement).value);
+              }
+            }}
+            onBlur={(e) => {
+              setUserName((e.currentTarget as HTMLInputElement).value);
+            }}
+            className="w-full px-4 py-3 mb-2 rounded-xl border border-[#E5E0D8] text-sm focus:outline-none focus:ring-1 focus:ring-[#1B4B43]"
+          />
+          <datalist id="name-options">
+            {NAME_OPTIONS.map((name) => (
+              <option key={name} value={name} />
+            ))}
+          </datalist>
+        </div>
+
+        <p className="text-[#6B665F] text-sm leading-relaxed max-w-xs mx-auto mb-12">
+          <span className="font-bold text-[#1B4B43]">BODINOTE PRO</span>만의 프리미엄 솔루션으로
+          <br />
+          당신의 피부 잠재력을 확인하세요.
+          <br />
+          <span className="text-[#1B4B43] font-semibold border-b border-[#1B4B43]/30">막걸리 발효 테라피</span>의 변화를 기록합니다.
+        </p>
+      </div>
+
+      <button
+        onClick={() => {
+          if (!userName) return;
+          setStep('capture-before');
+        }}
+        className="w-full bg-[#1B4B43] text-white py-5 rounded-full font-medium tracking-wide shadow-lg hover:bg-[#153A33] hover:shadow-xl transition-all flex items-center justify-center gap-3 group"
+      >
+        <span>피부 측정 시작하기</span>
+        <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform" />
+      </button>
+    </div>
+  );
+
+  const CaptureView = ({ type }: { type: 'before' | 'after' }) => (
+    <div className="flex flex-col min-h-screen bg-[#FDFCF8] px-6 pt-8">
+      <div className="flex-1 flex flex-col items-center">
+        <div className="w-full max-w-md mb-8">
+          <h2 className="text-2xl font-serif text-[#1B4B43] mb-2 text-center">
+            {type === 'before' ? 'Before Analysis' : 'After Treatment'}
+          </h2>
+          <p className="text-center text-[#8C8781] text-sm font-light">
+            {type === 'before'
+              ? '정확한 분석을 위해 민낯 상태로 촬영해주세요.'
+              : '트리트먼트 후 변화된 피부결을 확인합니다.'}
+          </p>
+        </div>
+
+        <div className="relative w-full aspect-[3/4] max-w-sm rounded-[2rem] overflow-hidden bg-[#F0EFEC] shadow-inner border border-[#E5E0D8] group cursor-pointer transition-colors hover:bg-[#EBE9E4]">
+          <input
+            type="file"
+            accept="image/*"
+            capture="user"
+            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-30"
+            onChange={(e) => handleImageUpload(e, type)}
+          />
+
+          <div className="absolute inset-0 pointer-events-none z-10 flex flex-col items-center justify-center">
+            <div className="w-48 h-64 border border-[#1B4B43]/20 rounded-[4rem]"></div>
+          </div>
+          <div className="absolute inset-0 flex flex-col items-center justify-center z-0">
+            <div className="w-16 h-16 rounded-full bg-white shadow-sm flex items-center justify-center mb-4 group-hover:scale-110 transition-transform duration-300">
+              <Camera className="text-[#1B4B43]" size={28} strokeWidth={1.5} />
+            </div>
+            <span className="text-[#8C8781] text-xs tracking-widest uppercase">Tap to Capture</span>
+          </div>
+        </div>
+
+        <div className="mt-8 flex items-start gap-3 bg-white p-4 rounded-xl shadow-sm border border-[#E5E0D8] max-w-sm w-full">
+          <Sun size={18} className="text-amber-500 flex-shrink-0 mt-0.5" />
+          <p className="text-xs text-[#6B665F] leading-relaxed">
+            밝은 자연광 아래에서 촬영하면 피부 톤과 결을 더 정확하게 분석할 수 있습니다.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+
+  const AnalyzingView = ({ imageSrc }: { imageSrc: string | null }) => (
+    <div className="flex flex-col items-center justify-center min-h-screen bg-[#FDFCF8] px-6 relative overflow-hidden">
+      <style>{scanStyle}</style>
+
+      {/* Background Blur Image */}
+      {imageSrc && (
+        <div className="absolute inset-0 z-0 opacity-10 blur-xl scale-110 pointer-events-none">
+          <img src={imageSrc} className="w-full h-full object-cover" alt="Background" />
+        </div>
+      )}
+
+      {/* Scanning Card */}
+      <div className="relative w-64 h-64 mb-8 z-10 rounded-3xl overflow-hidden border border-[#1B4B43]/20 shadow-2xl bg-white/50 backdrop-blur-sm">
+        {imageSrc ? (
+          <img src={imageSrc} className="w-full h-full object-cover" alt="Scanning" />
+        ) : (
+          <div className="w-full h-full bg-gray-100"></div>
+        )}
+
+        <div className="absolute inset-0 bg-[#1B4B43]/10"></div>
+
+        {/* Scanning Line */}
+        <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-[#1B4B43] to-transparent shadow-[0_0_20px_#1B4B43] animate-scan z-20"></div>
+
+        {/* Center Spinner */}
+        <div className="absolute inset-0 flex items-center justify-center z-30">
+          <div className="relative">
+            <div className="w-20 h-20 border-2 border-white/30 rounded-full animate-spin"></div>
+            <div className="absolute inset-0 border-t-2 border-[#1B4B43] rounded-full animate-spin"></div>
+          </div>
+        </div>
+      </div>
+
+      <div className="z-10 text-center relative">
+        <h3 className="text-2xl font-serif text-[#1B4B43] mb-3 tracking-wide animate-pulse">
+          Analyzing Skin...
+        </h3>
+        <div className="flex flex-col items-center gap-2 text-xs text-[#8C8781] tracking-widest uppercase font-medium">
+          <span className="flex items-center gap-2">
+            <Activity size={12} className="text-[#1B4B43]" /> Processing Image Data
+          </span>
+          <span className="flex items-center gap-2 delay-100">
+            <Droplet size={12} className="text-blue-400" /> Measuring Moisture Levels
+          </span>
+          <span className="flex items-center gap-2 delay-200">
+            <Sparkles size={12} className="text-amber-400" /> Calculating Tone Balance
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+
+  const AnalysisResultBefore = () => (
+    <div className="bg-[#FDFCF8] min-h-screen pb-24">
+      <div className="relative h-[40vh]">
+        <img src={beforeImage || ''} alt="Before" className="w-full h-full object-cover" />
+        <div className="absolute inset-0 bg-gradient-to-t from-[#FDFCF8] via-transparent to-transparent"></div>
+        <div className="absolute bottom-0 left-0 right-0 p-6">
+          <span className="bg-white/80 backdrop-blur px-3 py-1 rounded-full text-xs font-bold text-[#1B4B43] uppercase tracking-wider mb-2 inline-block shadow-sm">
+            Current Status
+          </span>
+          <div className="flex items-end gap-3">
+            <h2 className="text-5xl font-serif text-[#1B4B43]">{beforeData?.score ?? '--'}</h2>
+            <span className="text-[#6B665F] pb-2 font-light">/ 100 Point</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="px-6 -mt-4 relative z-10">
+        <div className="bg-white rounded-3xl p-6 shadow-xl shadow-[#1B4B43]/5 border border-[#E5E0D8]">
+          <div className="flex items-center justify-between mb-6">
+            <h3 className="font-serif text-[#1B4B43] text-lg">Skin Balance</h3>
+            <Activity size={16} className="text-[#D4C4B5]" />
+          </div>
+
+          <div className="h-64 w-full -ml-2">
+            <ResponsiveContainer width="100%" height="100%">
+              <RadarChart
+                cx="50%"
+                cy="50%"
+                outerRadius="70%"
+                data={[
+                  { subject: '수분', A: beforeData?.moisture ?? 0, fullMark: 100 },
+                  { subject: '모공', A: beforeData?.pores ?? 0, fullMark: 100 },
+                  { subject: '톤', A: beforeData?.tone ?? 0, fullMark: 100 },
+                  { subject: '탄력', A: beforeData?.elasticity ?? 0, fullMark: 100 },
+                ]}
+              >
+                <PolarGrid stroke="#E5E0D8" strokeDasharray="3 3" />
+                <PolarAngleAxis dataKey="subject" tick={{ fill: '#8C8781', fontSize: 11, fontFamily: 'serif' }} />
+                <PolarRadiusAxis angle={30} domain={[0, 100]} tick={false} axisLine={false} />
+                <Radar name="현재 상태" dataKey="A" stroke="#1B4B43" strokeWidth={1.5} fill="#1B4B43" fillOpacity={0.15} />
+              </RadarChart>
+            </ResponsiveContainer>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4 mt-2">
+            {Object.entries({
+              수분: beforeData?.moisture ?? 0,
+              모공: beforeData?.pores ?? 0,
+              톤: beforeData?.tone ?? 0,
+              탄력: beforeData?.elasticity ?? 0,
+            }).map(([key, val]) => (
+              <div key={key} className="bg-[#F9F8F6] p-3 rounded-xl flex justify-between items-center">
+                <span className="text-xs text-[#6B665F]">{key}</span>
+                <span className="font-serif text-[#1B4B43] font-medium">{val as any}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="fixed bottom-6 left-6 right-6">
+        <button
+          onClick={() => setStep('treatment')}
+          className="w-full bg-[#1B4B43] text-white py-4 rounded-full font-medium shadow-lg hover:bg-[#153A33] transition-colors flex items-center justify-center gap-2"
+        >
+          <span>솔루션 처방 받기</span>
+          <ChevronRight size={16} />
+        </button>
+      </div>
+    </div>
+  );
+
+  const TreatmentGuide = () => (
+    <div className="flex flex-col min-h-screen bg-[#FDFCF8] px-6 pt-12 pb-8">
+      <div className="text-center mb-10">
+        <h2 className="text-2xl font-serif text-[#1B4B43] mb-3">Therapy Routine</h2>
+        <p className="text-[#8C8781] text-sm font-light">피부 본연의 힘을 깨우는 시간</p>
+      </div>
+
+      <div className="flex-1 space-y-6">
+        {[
+          { step: '01', title: 'Apply', desc: '막걸리 팩을 피부결을 따라 부드럽게 도포합니다.' },
+          { step: '02', title: 'Rest', desc: '유효 성분이 깊이 스며들도록 15분간 휴식합니다.' },
+          { step: '03', title: 'Cleanse', desc: '미온수로 가볍게 세안하여 맑은 피부를 만납니다.' },
+        ].map((item, idx) => (
+          <div key={idx} className="flex gap-6 items-start group">
+            <span className="font-serif text-3xl text-[#E5E0D8] group-hover:text-[#D4C4B5] transition-colors">
+              {item.step}
+            </span>
+            <div className="pt-2 border-b border-[#E5E0D8] pb-6 flex-1">
+              <h4 className="font-serif text-[#1B4B43] text-lg mb-1">{item.title}</h4>
+              <p className="text-[#6B665F] text-sm leading-relaxed font-light">{item.desc}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <button
+        onClick={() => setStep('capture-after')}
+        className="w-full bg-[#1B4B43] text-white py-4 rounded-full font-medium shadow-lg mt-8"
+      >
+        Care Complete
+      </button>
+    </div>
+  );
+
+  const FinalResult = () => {
+    const chartData = [
+      { name: '수분', before: beforeData?.moisture ?? 0, after: afterData?.moisture ?? 0 },
+      { name: '모공', before: beforeData?.pores ?? 0, after: afterData?.pores ?? 0 },
+      { name: '피부톤', before: beforeData?.tone ?? 0, after: afterData?.tone ?? 0 },
+      { name: '탄력', before: beforeData?.elasticity ?? 0, after: afterData?.elasticity ?? 0 },
+    ];
+
+    const improvements = [
+      { name: '수분', val: (afterData?.moisture ?? 0) - (beforeData?.moisture ?? 0) },
+      { name: '모공', val: (afterData?.pores ?? 0) - (beforeData?.pores ?? 0) },
+      { name: '피부톤', val: (afterData?.tone ?? 0) - (beforeData?.tone ?? 0) },
+      { name: '탄력', val: (afterData?.elasticity ?? 0) - (beforeData?.elasticity ?? 0) },
+    ];
+
+    const bestItem = improvements.reduce(
+      (prev, current) => (prev.val > current.val ? prev : current),
+      improvements[0]
+    );
+
+    return (
+      <div className="min-h-screen bg-[#FDFCF8] pb-10">
+        {/* Header - Compact */}
+        <div className="pt-8 px-6 text-center mb-6">
+          <span className="inline-block px-3 py-1 rounded-full border border-[#D4C4B5] text-[#8C8781] text-[10px] tracking-[0.2em] uppercase mb-3">
+            Analysis Report
+          </span>
+          <h2 className="text-2xl font-serif text-[#1B4B43] mb-1">Your Transformation</h2>
+
+          {/* Sync badge */}
+          {beforeData && afterData && (
+            <div className="mt-2 text-[11px] text-[#8C8781]">
+              {syncState.status === 'syncing' && 'Google Sheet 저장 중…'}
+              {syncState.status === 'ok' && 'Google Sheet 저장 완료'}
+              {syncState.status === 'error' && 'Google Sheet 저장 실패'}
+            </div>
+          )}
+        </div>
+
+        {/* Before/After Side-by-Side Comparison */}
+        <div className="px-6 mb-8 relative">
+          <div className="grid grid-cols-2 gap-4 items-start">
+            {/* Before Item */}
+            <div className="flex flex-col gap-3">
+              <div className="relative aspect-[3/4] rounded-2xl overflow-hidden shadow-inner border border-[#E5E0D8] group">
+                <img
+                  src={beforeImage || ''}
+                  className="w-full h-full object-cover filter grayscale opacity-90 transition-opacity group-hover:opacity-100"
+                  alt="Before"
+                />
+                <span className="absolute top-3 left-3 bg-black/30 backdrop-blur text-white text-[10px] font-medium tracking-widest uppercase px-2 py-1 rounded-full">
+                  Before
+                </span>
+              </div>
+              <div className="text-center">
+                <span className="block text-xs text-[#8C8781] tracking-wider uppercase mb-1">Score</span>
+                <span className="font-serif text-2xl text-[#D4C4B5]">{beforeData?.score ?? '--'}</span>
+              </div>
+            </div>
+
+            {/* After Item */}
+            <div className="flex flex-col gap-3">
+              <div className="relative aspect-[3/4] rounded-2xl overflow-hidden shadow-xl ring-1 ring-[#1B4B43]/20">
+                <img src={afterImage || ''} className="w-full h-full object-cover" alt="After" />
+                <div className="absolute inset-0 bg-gradient-to-t from-[#1B4B43]/30 to-transparent pointer-events-none opacity-60"></div>
+                <span className="absolute top-3 left-3 bg-[#1B4B43] text-white text-[10px] font-medium tracking-widest uppercase px-2 py-1 rounded-full shadow-sm">
+                  After
+                </span>
+                {/* Best Improvement Tag */}
+                <div className="absolute bottom-2 right-2 bg-white/90 backdrop-blur px-2 py-1 rounded text-[10px] text-[#1B4B43] font-bold shadow-sm">
+                  +{bestItem?.val ?? 0} {bestItem?.name ?? ''}
+                </div>
+              </div>
+              <div className="text-center">
+                <span className="block text-xs text-[#1B4B43] tracking-wider uppercase mb-1">Score</span>
+                <div className="flex items-center justify-center gap-1">
+                  <span className="font-serif text-3xl text-[#1B4B43] font-bold">{afterData?.score ?? '--'}</span>
+                  <Sparkles size={14} className="text-amber-400" />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Central Connector Arrow */}
+          <div className="absolute top-[35%] left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-8 h-8 bg-white rounded-full shadow-md border border-[#E5E0D8] flex items-center justify-center z-10">
+            <ArrowRight size={14} className="text-[#1B4B43]" />
+          </div>
+        </div>
+
+        {/* Improvement Summary Text */}
+        <div className="mx-6 mb-8 text-center bg-white p-4 rounded-xl shadow-sm border border-[#F5F3EF]">
+          <p className="text-[#1B4B43] text-sm font-serif">
+            피부 컨디션이{' '}
+            <span className="font-bold underline decoration-amber-200 decoration-2 underline-offset-2">
+              {(afterData?.score ?? 0) - (beforeData?.score ?? 0)}점 향상
+            </span>
+            되었습니다.
+          </p>
+        </div>
+
+        {/* Detailed Chart */}
+        <div className="px-6 mb-10">
+          <div className="bg-[#F9F8F6] rounded-3xl p-6">
+            <h3 className="font-serif text-[#1B4B43] mb-6 text-sm tracking-wide uppercase">Detailed Analysis</h3>
+            <div className="h-48">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={chartData} layout="vertical" barCategoryGap={12}>
+                  <XAxis type="number" hide domain={[0, 100]} />
+                  <YAxis
+                    dataKey="name"
+                    type="category"
+                    tick={{ fontSize: 11, fill: '#6B665F', fontFamily: 'serif' }}
+                    width={48}
+                    tickLine={false}
+                    axisLine={false}
+                  />
+                  <Bar dataKey="before" name="Before" fill="#E5E0D8" radius={[0, 100, 100, 0]} barSize={6} />
+                  <Bar dataKey="after" name="After" fill="#1B4B43" radius={[0, 100, 100, 0]} barSize={6} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        </div>
+
+        {/* Footer Action */}
+        <div className="px-6">
+          <button
+            onClick={() => {
+              setStep('intro');
+              setBeforeImage(null);
+              setAfterImage(null);
+              setBeforeData(null);
+              setAfterData(null);
+              setHasSynced(false);
+              setSyncState({ status: 'idle', message: '' });
+            }}
+            className="w-full border border-[#D4C4B5] text-[#6B665F] py-4 rounded-full text-sm font-medium hover:bg-white transition-colors flex items-center justify-center gap-2"
+          >
+            <RefreshCw size={14} />
+            Reset Analysis
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="min-h-screen bg-[#FDFCF8] font-sans text-gray-800 max-w-lg mx-auto shadow-2xl relative">
+      {step !== 'intro' && step !== 'result' && <Header />}
+
+      <main className="w-full">
+        {step === 'intro' && <IntroView />}
+        {step === 'capture-before' && <CaptureView type="before" />}
+        {step === 'analyze-before' && (isAnalyzing ? <AnalyzingView imageSrc={beforeImage} /> : <AnalysisResultBefore />)}
+        {step === 'treatment' && <TreatmentGuide />}
+        {step === 'capture-after' && <CaptureView type="after" />}
+        {step === 'result' && (isAnalyzing ? <AnalyzingView imageSrc={afterImage} /> : <FinalResult />)}
+      </main>
+    </div>
+  );
+};
+
+export default BodiNoteProApp;
